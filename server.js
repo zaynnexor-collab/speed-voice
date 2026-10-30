@@ -31,7 +31,7 @@ app.post('/api/meeting/create',auth,async(req,res)=>{
  if(closeError)throw closeError;
  for(const m of old||[]){await removeMeetingRoom(m.id);meetingState.delete(m.id)}
  const secret=crypto.randomBytes(32).toString('hex');
- const {data,error}=await db.from('voice_meetings').insert({token_hash:hash(secret),created_by:req.member.id}).select('id,expires_at').single();
+ const {data,error}=await db.from('voice_meetings').insert({token_hash:hash(secret),created_by:req.member.id,controlled_audio:false}).select('id,expires_at').single();
  if(error)throw error;
  res.json({url:'/meeting?key='+encodeURIComponent(secret),expiresAt:data.expires_at,id:data.id});
  }catch(e){console.error('meeting-create',e.message);res.status(500).json({error:'Não foi possível criar a reunião'})}
