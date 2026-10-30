@@ -1,11 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createClient} from '@supabase/supabase-js';
 import {AccessToken} from 'livekit-server-sdk';
 const required=['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','LIVEKIT_URL','LIVEKIT_API_KEY','LIVEKIT_API_SECRET'];
 const missing=required.filter(k=>!process.env[k]);
-const app=express();app.disable('x-powered-by');app.use(express.json({limit:'8kb'}));
+const app=express();app.use(express.static(path.join(path.dirname(fileURLToPath(import.meta.url)),'public')));app.disable('x-powered-by');app.use(express.json({limit:'8kb'}));
 app.use(cors({origin:(process.env.FRONTEND_ORIGIN||'http://localhost:5173').split(',')}));
 const db=missing.length?null:createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false}});
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
