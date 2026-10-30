@@ -29,7 +29,7 @@ app.post('/api/meeting/create',auth,async(req,res)=>{
  if(lookupError)throw lookupError;
  const {error:closeError}=await db.from('voice_meetings').update({active:false,ended_at:new Date().toISOString()}).eq('active',true);
  if(closeError)throw closeError;
- for(const m of old||[])await removeMeetingRoom(m.id);
+ for(const m of old||[]){await removeMeetingRoom(m.id);meetingState.delete(m.id)}
  const secret=crypto.randomBytes(32).toString('hex');
  const {data,error}=await db.from('voice_meetings').insert({token_hash:hash(secret),created_by:req.member.id}).select('id,expires_at').single();
  if(error)throw error;
@@ -41,12 +41,12 @@ app.post('/api/meeting/end',auth,async(req,res)=>{
  const id=safe(req.body.id,50);if(!/^[0-9a-f-]{36}$/i.test(id))return res.status(400).json({error:'Reunião inválida'});
  const {data,error}=await db.from('voice_meetings').update({active:false,ended_at:new Date().toISOString()}).eq('id',id).eq('active',true).select('id').maybeSingle();
  if(error)return res.status(500).json({error:'Erro ao encerrar'});
- if(data)await removeMeetingRoom(id);
+ if(data){await removeMeetingRoom(id);meetingState.delete(id);await db.from('meeting_attendance').update({left_at:new Date().toISOString()}).eq('meeting_id',id).is('left_at',null)}
  res.json({ended:true});
 });
 app.post('/api/meeting/current',auth,async(req,res)=>{
  if(req.member.role!=='admin')return res.status(403).json({error:'Apenas administradores'});
- const {data,error}=await db.from('voice_meetings').select('id,created_at,expires_at').eq('active',true).gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false}).limit(1).maybeSingle();
+ const {data,error}=await db.from('voice_meetings').select('id,created_at,expires_at,waiting_room,controlled_audio').eq('active',true).gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false}).limit(1).maybeSingle();
  if(error)return res.status(500).json({error:'Erro ao consultar reunião'});
  res.json({meeting:data});
 });
@@ -65,19 +65,33 @@ app.post('/api/meeting/admin-join',auth,async(req,res)=>{
  }catch(e){res.status(500).json({error:'Falha ao iniciar transmissão'})}
 });
 
+
+const meetingState=new Map();
+function stateFor(id){if(!meetingState.has(id))meetingState.set(id,{waiting:new Map(),approved:new Set(),blocked:new Set(),speakers:new Set(),moderated:true});return meetingState.get(id)}
+function validMeetingId(id){return /^[0-9a-f-]{36}$/i.test(id)}
+async function activeMeeting(id){const {data}=await db.from('voice_meetings').select('id,waiting_room,controlled_audio').eq('id',id).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();return data}
+function meetingAdmin(req,res,next){if(req.member.role!=='admin')return res.status(403).json({error:'Somente administradores'});next()}
+app.post('/api/meeting/settings',auth,meetingAdmin,async(req,res)=>{const id=safe(req.body.id,50);if(!validMeetingId(id))return res.status(400).json({error:'Reunião inválida'});const patch={};if(typeof req.body.waiting_room==='boolean')patch.waiting_room=req.body.waiting_room;if(typeof req.body.controlled_audio==='boolean')patch.controlled_audio=req.body.controlled_audio;if(!Object.keys(patch).length)return res.status(400).json({error:'Sem alterações'});const {data,error}=await db.from('voice_meetings').update(patch).eq('id',id).eq('active',true).select('id,waiting_room,controlled_audio').maybeSingle();if(error||!data)return res.status(400).json({error:'Reunião não encontrada'});const s=stateFor(id);s.moderated=data.controlled_audio;res.json({meeting:data})});
+app.post('/api/meeting/attendance',auth,meetingAdmin,async(req,res)=>{const id=safe(req.body.id,50);if(!validMeetingId(id))return res.status(400).json({error:'Reunião inválida'});const {data,error}=await db.from('meeting_attendance').select('name,unit,joined_at,left_at').eq('meeting_id',id).order('joined_at',{ascending:true});if(error)return res.status(500).json({error:'Falha ao carregar presenças'});res.json({attendance:data||[]})});
+app.post('/api/meeting/attendance/history',auth,meetingAdmin,async(req,res)=>{const {data,error}=await db.from('voice_meetings').select('id,created_at,ended_at').order('created_at',{ascending:false}).limit(20);if(error)return res.status(500).json({error:'Falha ao carregar histórico'});res.json({meetings:data||[]})});
+app.post('/api/meeting/attendance/event',async(req,res)=>{const id=safe(req.body.meetingId,50),participant=safe(req.body.participantId,100),key=safe(req.body.key,160),event=safe(req.body.event,20);if(!validMeetingId(id)||!participant||!['join','leave'].includes(event))return res.status(400).json({error:'Dados inválidos'});const {data:m}=await db.from('voice_meetings').select('id').eq('id',id).eq('token_hash',hash(key)).maybeSingle();if(!m)return res.status(403).json({error:'Link inválido'});if(event==='join'){const {data:active}=await db.from('voice_meetings').select('id').eq('id',id).eq('active',true).maybeSingle();if(!active)return res.status(403).json({error:'Reunião encerrada'});const name=safe(req.body.name,70),unit=safe(req.body.unit,60);if(!meetingUnits.includes(unit)||name.length<2)return res.status(400).json({error:'Participante inválido'});await db.from('meeting_attendance').upsert({meeting_id:id,participant_id:participant,name,unit,joined_at:new Date().toISOString(),left_at:null},{onConflict:'meeting_id,participant_id'})}else await db.from('meeting_attendance').update({left_at:new Date().toISOString()}).eq('meeting_id',id).eq('participant_id',participant);res.json({ok:true})});
+app.post('/api/meeting/moderate',auth,meetingAdmin,async(req,res)=>{const id=safe(req.body.id,50),identity=safe(req.body.identity,120),action=safe(req.body.action,30);if(!validMeetingId(id)||!identity||!['approve','deny','remove','allow_speak','revoke_speak'].includes(action))return res.status(400).json({error:'Dados inválidos'});if(!await activeMeeting(id))return res.status(404).json({error:'Reunião encerrada'});const s=stateFor(id);const pending=s.waiting.get(identity);if(action==='approve'){if(!pending)return res.status(404).json({error:'Participante não está aguardando'});s.approved.add(identity);s.waiting.delete(identity)}if(action==='deny'){s.waiting.delete(identity);s.blocked.add(identity)}if(action==='remove'){s.blocked.add(identity);s.approved.delete(identity);s.speakers.delete(identity);try{await lkAdmin().removeParticipant('speed-meeting-'+id,identity)}catch(e){console.warn(e.message)}}if(action==='allow_speak'||action==='revoke_speak'){if(action==='allow_speak')s.speakers.add(identity);else s.speakers.delete(identity);try{await lkAdmin().updateParticipant('speed-meeting-'+id,identity,undefined,undefined,{canPublish:true,canSubscribe:true,canPublishSources:action==='allow_speak'?['microphone']:[]})}catch(e){return res.status(409).json({error:'Participante não está conectado'})}}res.json({ok:true})});
+app.post('/api/meeting/lobby',auth,meetingAdmin,async(req,res)=>{const id=safe(req.body.id,50);if(!validMeetingId(id))return res.status(400).json({error:'Reunião inválida'});const s=stateFor(id);res.json({waiting:[...s.waiting.entries()].map(([identity,p])=>({identity,...p})),speakers:[...s.speakers]})});
+app.post('/api/meeting/check',async(req,res)=>{const id=safe(req.body.id,50),identity=safe(req.body.identity,120),key=safe(req.body.key,160);if(!validMeetingId(id)||!identity||!/^[0-9a-f]{64}$/i.test(key))return res.status(400).json({error:'Dados inválidos'});const {data}=await db.from('voice_meetings').select('id,waiting_room,controlled_audio').eq('id',id).eq('token_hash',hash(key)).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();if(!data)return res.status(403).json({error:'Reunião encerrada'});const s=stateFor(id);if(s.blocked.has(identity))return res.status(403).json({error:'Acesso recusado'});if(data.waiting_room&&!s.approved.has(identity))return res.json({approved:false});res.json({approved:true,controlled_audio:data.controlled_audio})});
+
 const meetingUnits=['colatina','linhares-shell','linhares-movelar','serra','vitoria','lindemberg','brisamar','coqueiral','moxuara','maracana','diretoria'];
 const guestAttempts=new Map();
 app.post('/api/meeting/join',async(req,res)=>{const ip=req.ip||'unknown';const now=Date.now();const prev=guestAttempts.get(ip)||{n:0,until:now+60000};if(now>prev.until){prev.n=0;prev.until=now+60000}if(++prev.n>20)return res.status(429).json({error:'Muitas tentativas. Aguarde um minuto.'});guestAttempts.set(ip,prev);
  if(!db)return res.status(503).json({error:'Servidor não configurado'});
  const key=safe(req.body.key,160),name=safe(req.body.name,70),unit=safe(req.body.unit,60);
  if(!/^[0-9a-f]{64}$/i.test(key)||name.length<2||!meetingUnits.includes(unit))return res.status(400).json({error:'Informe nome e loja válidos'});
- const {data,error}=await db.from('voice_meetings').select('id,expires_at').eq('token_hash',hash(key)).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();
+ const {data,error}=await db.from('voice_meetings').select('id,expires_at,waiting_room,controlled_audio').eq('token_hash',hash(key)).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();
  if(error)return res.status(500).json({error:'Falha ao validar reunião'});
  if(!data)return res.status(403).json({error:'Esta reunião foi encerrada ou o link expirou'});
  try{
- const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:crypto.randomUUID(),name,metadata:JSON.stringify({unit,role:'guest'}),ttl:'30s'});
- t.addGrant({roomJoin:true,room:'speed-meeting-'+data.id,canPublish:true,canSubscribe:true,canPublishSources:['microphone']});
- res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt(),meetingId:data.id});
+ const identity=crypto.randomUUID();const s=stateFor(data.id);if(data.waiting_room){s.waiting.set(identity,{name,unit,requestedAt:new Date().toISOString()})}const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity,name,metadata:JSON.stringify({unit,role:'guest'}),ttl:'30s'});
+ t.addGrant({roomJoin:true,room:'speed-meeting-'+data.id,canPublish:true,canSubscribe:true,canPublishSources:data.controlled_audio?[]:['microphone']});
+ res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt(),meetingId:data.id,identity,waitingRoom:data.waiting_room,controlledAudio:data.controlled_audio});
  }catch(e){res.status(500).json({error:'Falha ao conectar ao áudio'})}
 });
 
