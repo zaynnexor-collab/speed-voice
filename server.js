@@ -59,22 +59,23 @@ app.post('/api/meeting/admin-join',auth,async(req,res)=>{
  if(error)return res.status(500).json({error:'Falha ao consultar reunião'});
  if(!data)return res.status(404).json({error:'Reunião encerrada ou expirada'});
  try{
- const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:'admin-'+req.member.id,name:req.member.name+' · ADMIN',ttl:'2m'});
+ const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:'admin-'+req.member.id,name:req.member.name,metadata:JSON.stringify({unit:'diretoria',role:'admin'}),ttl:'2m'});
  t.addGrant({roomJoin:true,room:'speed-meeting-'+id,canPublish:true,canSubscribe:true,canPublishSources:['microphone','screen_share','screen_share_audio']});
  res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt()});
  }catch(e){res.status(500).json({error:'Falha ao iniciar transmissão'})}
 });
 
+const meetingUnits=['colatina','linhares-shell','linhares-movelar','serra','vitoria','lindemberg','brisamar','coqueiral','moxuara','maracana','diretoria'];
 const guestAttempts=new Map();
 app.post('/api/meeting/join',async(req,res)=>{const ip=req.ip||'unknown';const now=Date.now();const prev=guestAttempts.get(ip)||{n:0,until:now+60000};if(now>prev.until){prev.n=0;prev.until=now+60000}if(++prev.n>20)return res.status(429).json({error:'Muitas tentativas. Aguarde um minuto.'});guestAttempts.set(ip,prev);
  if(!db)return res.status(503).json({error:'Servidor não configurado'});
- const key=safe(req.body.key,160),name=safe(req.body.name,70);
- if(!/^[0-9a-f]{64}$/i.test(key)||name.length<2)return res.status(400).json({error:'Nome ou link inválido'});
+ const key=safe(req.body.key,160),name=safe(req.body.name,70),unit=safe(req.body.unit,60);
+ if(!/^[0-9a-f]{64}$/i.test(key)||name.length<2||!meetingUnits.includes(unit))return res.status(400).json({error:'Informe nome e loja válidos'});
  const {data,error}=await db.from('voice_meetings').select('id,expires_at').eq('token_hash',hash(key)).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();
  if(error)return res.status(500).json({error:'Falha ao validar reunião'});
  if(!data)return res.status(403).json({error:'Esta reunião foi encerrada ou o link expirou'});
  try{
- const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:crypto.randomUUID(),name,ttl:'30s'});
+ const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:crypto.randomUUID(),name,metadata:JSON.stringify({unit,role:'guest'}),ttl:'30s'});
  t.addGrant({roomJoin:true,room:'speed-meeting-'+data.id,canPublish:true,canSubscribe:true,canPublishSources:['microphone']});
  res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt(),meetingId:data.id});
  }catch(e){res.status(500).json({error:'Falha ao conectar ao áudio'})}
