@@ -50,6 +50,21 @@ app.post('/api/meeting/current',auth,async(req,res)=>{
  if(error)return res.status(500).json({error:'Erro ao consultar reunião'});
  res.json({meeting:data});
 });
+
+app.post('/api/meeting/admin-join',auth,async(req,res)=>{
+ if(req.member.role!=='admin')return res.status(403).json({error:'Apenas administradores'});
+ const id=safe(req.body.id,50);
+ if(!/^[0-9a-f-]{36}$/i.test(id))return res.status(400).json({error:'Reunião inválida'});
+ const {data,error}=await db.from('voice_meetings').select('id').eq('id',id).eq('active',true).gt('expires_at',new Date().toISOString()).maybeSingle();
+ if(error)return res.status(500).json({error:'Falha ao consultar reunião'});
+ if(!data)return res.status(404).json({error:'Reunião encerrada ou expirada'});
+ try{
+ const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:'admin-'+req.member.id,name:req.member.name+' · ADMIN',ttl:'2m'});
+ t.addGrant({roomJoin:true,room:'speed-meeting-'+id,canPublish:true,canSubscribe:true,canPublishSources:['microphone','screen_share','screen_share_audio']});
+ res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt()});
+ }catch(e){res.status(500).json({error:'Falha ao iniciar transmissão'})}
+});
+
 const guestAttempts=new Map();
 app.post('/api/meeting/join',async(req,res)=>{const ip=req.ip||'unknown';const now=Date.now();const prev=guestAttempts.get(ip)||{n:0,until:now+60000};if(now>prev.until){prev.n=0;prev.until=now+60000}if(++prev.n>20)return res.status(429).json({error:'Muitas tentativas. Aguarde um minuto.'});guestAttempts.set(ip,prev);
  if(!db)return res.status(503).json({error:'Servidor não configurado'});
@@ -60,7 +75,7 @@ app.post('/api/meeting/join',async(req,res)=>{const ip=req.ip||'unknown';const n
  if(!data)return res.status(403).json({error:'Esta reunião foi encerrada ou o link expirou'});
  try{
  const t=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:crypto.randomUUID(),name,ttl:'30s'});
- t.addGrant({roomJoin:true,room:'speed-meeting-'+data.id,canPublish:true,canSubscribe:true});
+ t.addGrant({roomJoin:true,room:'speed-meeting-'+data.id,canPublish:true,canSubscribe:true,canPublishSources:['microphone']});
  res.json({url:process.env.LIVEKIT_URL,token:await t.toJwt(),meetingId:data.id});
  }catch(e){res.status(500).json({error:'Falha ao conectar ao áudio'})}
 });
